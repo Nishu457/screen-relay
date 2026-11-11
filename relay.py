@@ -1,3 +1,4 @@
+import os
 import asyncio
 import websockets
 
@@ -5,39 +6,57 @@ import websockets
 ROOMS = {}
 
 async def handler(websocket):
-    role_info = await websocket.recv()
-    # Format expected: "JOIN:<room_id>:<sender|receiver>"
-    parts = role_info.split(":")
-    if len(parts) != 3 or parts[0] != "JOIN":
-        await websocket.close()
-        return
-
-    _, room_id, role = parts
-    if room_id not in ROOMS:
-        ROOMS[room_id] = {"sender": None, "receiver": None}
-
-    ROOMS[room_id][role] = websocket
-    print(f"[+] {role.capitalize()} connected to room '{room_id}'")
-
     try:
+        role_info = await websocket.recv()
+        if not isinstance(role_info, str):
+            await websocket.close()
+            return
+
+        parts = role_info.split(":")
+        if len(parts) != 3 or parts[0] != "JOIN":
+            await websocket.close()
+            return
+
+        _, room_id, role = parts
+        if room_id not in ROOMS:
+            ROOMS[room_id] = {"sender": None, "receiver": None}
+
+        ROOMS[room_id][role] = websocket
+        print(f"[+] {role.capitalize()} connected to room '{room_id}'", flush=True)
+
         async for message in websocket:
             target_role = "receiver" if role == "sender" else "sender"
             target_ws = ROOMS[room_id].get(target_role)
-            if target_ws and target_ws.open:
-                await target_ws.send(message)
+            
+            # Send directly without checking .open (compatible with websockets v14+)
+            if target_ws is not None:
+                try:
+                    await target_ws.send(message)
+                except websockets.exceptions.ConnectionClosed:
+                    ROOMS[room_id][target_role] = None
+
     except websockets.exceptions.ConnectionClosed:
         pass
+    except Exception as e:
+        print(f"[!] Relay error: {e}", flush=True)
     finally:
-        print(f"[-] {role.capitalize()} disconnected from room '{room_id}'")
-        if ROOMS.get(room_id, {}).get(role) == websocket:
-            ROOMS[room_id][role] = None
-        if not ROOMS[room_id]["sender"] and not ROOMS[room_id]["receiver"]:
-            ROOMS.pop(room_id, None)
+        if 'room_id' in locals() and 'role' in locals():
+            print(f"[-] {role.capitalize()} disconnected from '{room_id}'", flush=True)
+            if ROOMS.get(room_id, {}).get(role) == websocket:
+                ROOMS[room_id][role] = None
 
 async def main():
-    port = 8765
-    async with websockets.serve(handler, "0.0.0.0", port):
-        print(f"[*] Relay server listening on ws://0.0.0.0:{port}")
+    # Render assigns a dynamic port via the PORT environment variable
+    port = int(os.environ.get("PORT", 8765))
+    async with websockets.serve(
+        handler,
+        "0.0.0.0",
+        port,
+        max_size=10_000_000,
+        ping_interval=20,
+        ping_timeout=20
+    ):
+        print(f"[*] Relay server listening on port {port}", flush=True)
         await asyncio.Future()
 
 if __name__ == "__main__":
